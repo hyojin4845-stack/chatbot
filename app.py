@@ -13,6 +13,7 @@ os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 
 import streamlit as st
 from dotenv import load_dotenv
+from streamlit.errors import StreamlitSecretNotFoundError
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -24,6 +25,16 @@ from pypdf import PdfReader
 
 # 프로젝트 최상위 폴더와 문서 폴더를 기준으로 경로를 만듭니다.
 DATA_DIR = BASE_DIR / "DATA"
+
+
+def get_openai_api_key() -> str | None:
+    """배포 환경에서는 Streamlit Secrets, 로컬에서는 .env에서 키를 읽습니다."""
+    try:
+        cloud_key = st.secrets.get("OPENAI_API_KEY")
+    except StreamlitSecretNotFoundError:
+        cloud_key = None
+
+    return cloud_key or os.getenv("OPENAI_API_KEY")
 
 
 def read_text_file(path: Path) -> str:
@@ -108,6 +119,10 @@ def evidence_sentence(
 @st.cache_resource(show_spinner=False)
 def build_rag() -> tuple[InMemoryVectorStore, list[Document], int, int]:
     """문서를 읽고 임베딩한 뒤, InMemoryVectorStore를 만듭니다."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY가 설정되지 않았습니다.")
+
     raw_documents = load_documents()
     if not raw_documents:
         raise ValueError("DATA 폴더에서 읽을 수 있는 문서를 찾지 못했습니다.")
@@ -122,6 +137,7 @@ def build_rag() -> tuple[InMemoryVectorStore, list[Document], int, int]:
     # 지정한 임베딩 모델로 청크를 벡터로 바꿉니다.
     embeddings = OpenAIEmbeddings(
         model="text-embedding-3-small",
+        api_key=api_key,
         # 로컬 토큰화기를 사용하지 않고 원문을 OpenAI API에 전달합니다.
         # 따라서 tiktoken 인코딩 파일이나 transformers 모델을 별도로 다운로드하지 않습니다.
         check_embedding_ctx_length=False,
@@ -209,7 +225,11 @@ CONTEXT:
             ("human", "질문: {question}"),
         ]
     )
-    model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    model = ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0,
+        api_key=get_openai_api_key(),
+    )
     chain = prompt | model | StrOutputParser()
     answer = chain.invoke({"context": context, "question": question})
     return answer, retrieved_documents
@@ -222,8 +242,11 @@ def main() -> None:
     st.title("📚 문서 기반 RAG 챗봇")
     st.caption("DATA 폴더의 문서만 근거로 답변합니다.")
 
-    if not os.getenv("OPENAI_API_KEY"):
-        st.error(".env 파일에 OPENAI_API_KEY를 입력한 뒤 앱을 다시 실행하세요.")
+    if not get_openai_api_key():
+        st.error(
+            "OPENAI_API_KEY가 설정되지 않았습니다. "
+            "로컬에서는 .env에, Streamlit Cloud에서는 App settings > Secrets에 입력하세요."
+        )
         st.stop()
 
     try:
